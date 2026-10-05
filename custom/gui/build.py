@@ -13,6 +13,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows 控制台默认 cp1252，输出中文/符号会抛 UnicodeEncodeError
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
