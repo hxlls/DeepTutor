@@ -1,0 +1,120 @@
+# ============================================
+# DeepTutor 试卷助手 · Docker Compose 部署
+# ============================================
+# 用法：
+#   首次部署   docker compose up -d
+#   查看日志   docker compose logs -f
+#   停止       docker compose down
+#   升级       ./upgrade.sh
+#
+# 数据与模型都挂载到宿主机，容器重建不丢。
+#
+# 关于 Ollama：默认把 Ollama 也放进容器（下面的 ollama 服务）。
+# 这样部署是自包含的 —— 目标机器不需要预装任何东西，bge-m3 会随
+# 开箱引导下载到 ./models/ollama。
+# 如果目标机器上已经有 Ollama 在跑，可以把 ollama 服务整段注释掉，
+# 并把 OLLAMA_HOST_BASE 改回 http://host.docker.internal:11434
+# （Linux 下还需打开 extra_hosts，见文件末尾）。
+# ============================================
+
+services:
+  # ============================================
+  # Ollama —— 本地向量模型（bge-m3）的运行环境
+  # ============================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: deeptutor-ollama
+    restart: unless-stopped
+
+    volumes:
+      # bge-m3 约 1.2GB，落在宿主机，重建容器不重下
+      - ./models/ollama:/root/.ollama
+
+    environment:
+      # 必须监听 0.0.0.0，否则 deeptutor 容器连不上
+      - OLLAMA_HOST=0.0.0.0:11434
+
+    # 不映射到宿主机端口 —— 只给 deeptutor 内部用。
+    # 需要在本机调试时再打开：
+    # ports:
+    #   - "11434:11434"
+
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================
+  # DeepTutor 主服务
+  # ============================================
+  deeptutor:
+    image: ghcr.io/hxlls/deeptutor:${DEEPTUTOR_TAG:-latest}
+    container_name: deeptutor
+    restart: unless-stopped
+
+    ports:
+      # 宿主机端口 : 容器内前端端口
+      - "${DEEPTUTOR_PORT:-80}:3782"
+      # 后端 API（可选，调试用）
+      - "${DEEPTUTOR_API_PORT:-8001}:8001"
+
+    volumes:
+      # ① 业务数据 —— 必须挂载，且要定期备份
+      #    知识库 / 配置 / 会话 / 题库
+      - ./data:/app/data
+
+      # ② MinerU 数据（独立 venv + 解析模型，约 2.8GB）
+      #    只有选「全本地部署」才会用到，由开箱引导按需下载。
+      #    bge-m3 走上面的 ollama 服务，不在这个目录。
+      - ./models/mineru:/app/data/.mineru
+
+      # ③ 备份目录（备份脚本输出到这里，宿主机可见）
+      - ./backups:/app/backups
+
+    environment:
+      # 指向容器内的 Ollama 服务
+      OLLAMA_HOST_BASE: "http://ollama:11434"
+
+      # 时区 —— 必须显式设置。官方镜像默认 UTC，会导致：
+      #   · 界面与日志时间差 8 小时
+      #   · AI 回答「今天几号」按 UTC 算，晚上会差一天
+      #   · 定时任务（cron）按 UTC 触发
+      TZ: "${DEEPTUTOR_TZ:-Asia/Shanghai}"
+
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3782/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ============================================
+# 改用宿主机已有的 Ollama
+# ============================================
+# 1) 把上面的 ollama 服务整段注释掉
+# 2) OLLAMA_HOST_BASE 改成 http://host.docker.internal:11434
+# 3) 给 deeptutor 服务加上：
+#
+#    extra_hosts:
+#      - "host.docker.internal:host-gateway"
+#
+# 4) 宿主机上的 Ollama 必须监听 0.0.0.0:11434：
+#      OLLAMA_HOST=0.0.0.0:11434 ollama serve

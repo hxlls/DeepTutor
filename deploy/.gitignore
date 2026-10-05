@@ -1,0 +1,6 @@
+# 运行时目录 —— 不进仓库（模型动辄 2GB，备份也不该进）
+data/
+models/
+backups/
+.env
+.deeptutor-version
