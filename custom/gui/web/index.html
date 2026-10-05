@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>DeepTutor 试卷助手</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    background: #f5f5f4; color: #2c2c2a; font-size: 14px; line-height: 1.6;
+  }
+  .tabs { display: flex; background: #fff; border-bottom: 1px solid #e5e5e3; }
+  .tab {
+    padding: 14px 26px; cursor: pointer; font-size: 14px;
+    color: #5f5e5a; border-bottom: 2px solid transparent;
+  }
+  .tab:hover { background: #fafaf9; }
+  .tab.active { color: #185fa5; border-bottom-color: #185fa5; font-weight: 500; }
+  .page { display: none; padding: 24px 28px; }
+  .page.active { display: block; }
+
+  h2 { font-size: 15px; font-weight: 500; margin-bottom: 6px; }
+  .hint { color: #888780; font-size: 12px; margin-bottom: 16px; }
+
+  .card {
+    background: #fff; border: 1px solid #e5e5e3; border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 16px;
+  }
+  .row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .row:last-child { margin-bottom: 0; }
+  label { min-width: 96px; color: #5f5e5a; font-size: 13px; }
+
+  input[type=text], input[type=password], select {
+    flex: 1; padding: 9px 12px; border: 1px solid #d3d1c7;
+    border-radius: 6px; font-size: 13px; font-family: inherit;
+    background: #fff; color: #2c2c2a;
+  }
+  input:focus, select:focus { outline: none; border-color: #378add; }
+
+  button {
+    padding: 9px 20px; border: none; border-radius: 6px;
+    background: #185fa5; color: #fff; font-size: 13px;
+    cursor: pointer; font-family: inherit;
+  }
+  button:hover { background: #0c447c; }
+  button:disabled { background: #b4b2a9; cursor: not-allowed; }
+  button.ghost { background: #fff; color: #185fa5; border: 1px solid #b5d4f4; }
+  button.ghost:hover { background: #e6f1fb; }
+
+  .status { display: flex; align-items: center; gap: 8px; padding: 7px 0; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .dot.ok { background: #1d9e75; }
+  .dot.no { background: #e24b4a; }
+  .dot.wait { background: #b4b2a9; }
+  .status .name { min-width: 130px; font-size: 13px; }
+  .status .val { color: #5f5e5a; font-size: 12px; }
+
+  #log {
+    background: #2c2c2a; color: #d3d1c7; font-family: Consolas, monospace;
+    font-size: 12px; padding: 14px; border-radius: 8px;
+    height: 380px; overflow-y: auto; white-space: pre-wrap;
+    word-break: break-all; line-height: 1.5;
+  }
+  #log .info { color: #b5d4f4; }
+  #log .done { color: #9fe1cb; }
+  #log .error { color: #f09595; }
+  #log .result { color: #fac775; }
+
+  .filelist { max-height: 220px; overflow-y: auto; border: 1px solid #e5e5e3; border-radius: 8px; }
+  .filelist div {
+    padding: 8px 12px; font-size: 12px; border-bottom: 1px solid #f1efe8;
+    display: flex; justify-content: space-between;
+  }
+  .filelist div:last-child { border-bottom: none; }
+  .filelist .cost { color: #854f0b; }
+
+  .note {
+    background: #faeeda; border: 1px solid #fac775; border-radius: 8px;
+    padding: 12px 14px; font-size: 12px; color: #854f0b; margin-bottom: 16px;
+  }
+  .note a { color: #185fa5; }
+  code { background: #f1efe8; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="tabs">
+  <div class="tab active" data-page="setup">① 配置</div>
+  <div class="tab" data-page="import">② 导入试卷</div>
+  <div class="tab" data-page="quiz">③ 出题</div>
+  <div class="tab" data-page="log">运行日志</div>
+</div>
+
+<!-- ========== 配置 ========== -->
+<div class="page active" id="page-setup">
+  <h2>第一次使用？按顺序做三步就好</h2>
+  <p class="hint">只需要一个 MiMo API Key，其他全部自动完成。</p>
+
+  <div class="card">
+    <h2>第 1 步 · 检查环境</h2>
+    <p class="hint">看看本地组件是否齐全</p>
+    <div id="env-list"></div>
+    <div class="row" style="margin-top:14px">
+      <button onclick="checkEnv()">重新检测</button>
+      <button class="ghost" onclick="deploy()">一键部署本地模型</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>第 2 步 · 填写 MiMo API Key</h2>
+    <p class="hint">
+      还没有？去
+      <a href="https://platform.xiaomimimo.com" target="_blank">小米开放平台</a>
+      注册后创建（邀请码 Z7EJ2L 可领体验金）。大模型走云端，本地不用装显卡。
+    </p>
+    <div class="row">
+      <label>API Key</label>
+      <input type="password" id="api-key" placeholder="sk-...">
+    </div>
+    <div class="row">
+      <label>模型</label>
+      <select id="model">
+        <option value="mimo-v2.6-flash">MiMo V2.6 Flash（便宜，日常够用）</option>
+        <option value="mimo-v2.6-pro">MiMo V2.6 Pro（更强，贵一些）</option>
+      </select>
+    </div>
+    <div class="row">
+      <button onclick="saveKey()">保存并测试连接</button>
+      <span id="key-result" class="hint" style="margin:0"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>第 3 步 · 开始用</h2>
+    <p class="hint">配置完成后，切到「导入试卷」页签即可</p>
+    <div class="row">
+      <button class="ghost" onclick="switchTab('import')">去导入试卷 →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 导入 ========== -->
+<div class="page" id="page-import">
+  <h2>导入试卷到知识库</h2>
+  <p class="hint">选一个文件夹，程序会自动扫描其中的文档并建立索引。</p>
+
+  <div class="note">
+    <b>关于视觉增强</b>：数学试卷里的公式往往是图片，普通导入会导致公式丢失。
+    开启视觉增强后，程序会用 MiMo 把图片转成 LaTeX 文字，检索时就能命中公式内容。
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <label>知识库名</label>
+      <input type="text" id="kb-name" placeholder="例如：初中数学" value="我的试卷">
+    </div>
+    <div class="row">
+      <label>文件夹</label>
+      <input type="text" id="import-dir" placeholder="粘贴文件夹路径，如 G:\试卷">
+    </div>
+    <div class="row">
+      <label style="min-width:96px">视觉增强</label>
+      <input type="checkbox" id="use-vision" style="flex:none;width:16px;height:16px">
+      <span class="hint" style="margin:0">先用 MiMo 把图片转成文字（推荐数学卷开启）</span>
+    </div>
+    <div class="row">
+      <button onclick="scanDir()">扫描文件夹</button>
+      <button onclick="doImport()">开始导入</button>
+    </div>
+    <div id="scan-result"></div>
+  </div>
+</div>
+
+<!-- ========== 出题 ========== -->
+<div class="page" id="page-quiz">
+  <h2>基于知识库出题</h2>
+  <p class="hint">指定知识点，AI 会从知识库里检索相关内容并生成题目。</p>
+
+  <div class="card">
+    <div class="row">
+      <label>知识库</label>
+      <select id="quiz-kb"></select>
+      <button class="ghost" onclick="loadKbs()">刷新</button>
+    </div>
+    <div class="row">
+      <label>知识点</label>
+      <input type="text" id="quiz-topic" placeholder="例如：二次函数的顶点与对称轴">
+    </div>
+    <div class="row">
+      <label>题目数量</label>
+      <input type="text" id="quiz-count" value="5" style="max-width:100px">
+      <label style="min-width:auto">难度</label>
+      <select id="quiz-diff" style="max-width:160px">
+        <option value="">不限</option>
+        <option value="easy">简单</option>
+        <option value="medium">中等</option>
+        <option value="hard">困难</option>
+      </select>
+    </div>
+    <div class="row">
+      <button onclick="doGenerate()">开始出题</button>
+      <span class="hint" style="margin:0">出题需要 1-3 分钟，结果会显示在日志页</span>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 日志 ========== -->
+<div class="page" id="page-log">
+  <h2>运行日志</h2>
+  <p class="hint">所有操作的输出都会显示在这里</p>
+  <div id="log"></div>
+  <div class="row" style="margin-top:12px">
+    <button class="ghost" onclick="document.getElementById('log').innerHTML=''">清空日志</button>
+  </div>
+</div>
+
+<script>
+let api = null;
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.page === name));
+  document.querySelectorAll('.page').forEach(p =>
+    p.classList.toggle('active', p.id === 'page-' + name));
+  if (name === 'quiz') loadKbs();
+}
+document.querySelectorAll('.tab').forEach(t =>
+  t.onclick = () => switchTab(t.dataset.page));
+
+function log(msg, kind) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = kind || 'info';
+  const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  line.textContent = `[${t}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+// 后端主动推送
+window.__onProgress = (p) => log(p.msg, p.kind);
+
+async function waitApi() {
+  while (!window.pywebview || !window.pywebview.api) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  api = window.pywebview.api;
+  checkEnv();
+}
+
+// ---------- 环境 ----------
+async function checkEnv() {
+  const r = await api.check_env();
+  const rows = [
+    ['Ollama', r.ollama_found, r.ollama_found ? r.ollama_path : '未安装，点下方按钮部署'],
+    ['Ollama 服务', r.ollama_running, r.ollama_running ? '运行中' : '未启动'],
+    ['Embedding 模型', r.embed_ready, r.embed_ready ? 'bge-m3 已就绪' : '未下载'],
+    ['MiMo Key', r.mimo_key_set, r.mimo_key_set ? '已配置 ' + r.mimo_key_hint : '未配置'],
+  ];
+  document.getElementById('env-list').innerHTML = rows.map(([n, ok, v]) =>
+    `<div class="status">
+       <span class="dot ${ok ? 'ok' : 'no'}"></span>
+       <span class="name">${n}</span>
+       <span class="val">${v}</span>
+     </div>`).join('');
+  log(`环境检测完成：Python ${r.python}，模型 ${r.models.length} 个`);
+}
+
+async function deploy() {
+  log('开始部署本地模型...');
+  await api.deploy_ollama();
+}
+
+async function saveKey() {
+  const key = document.getElementById('api-key').value.trim();
+  const model = document.getElementById('model').value;
+  if (!key) { alert('请先填写 API Key'); return; }
+  const el = document.getElementById('key-result');
+  el.textContent = '保存中...';
+  const r = await api.save_key(key, model);
+  if (r.ok) {
+    el.textContent = (r.test && r.test.msg) || '已保存';
+    log('配置已保存：' + JSON.stringify(r.test || {}));
+    checkEnv();
+  } else {
+    el.textContent = r.msg;
+    log('保存失败：' + r.msg, 'error');
+  }
+}
+
+// ---------- 导入 ----------
+async function scanDir() {
+  const dir = document.getElementById('import-dir').value.trim();
+  if (!dir) { alert('请先填写文件夹路径'); return; }
+  log('扫描中：' + dir);
+  const r = await api.scan_dir(dir);
+  const box = document.getElementById('scan-result');
+  if (!r.ok) { box.innerHTML = `<p class="hint">${r.msg}</p>`; return; }
+  if (!r.items.length) {
+    box.innerHTML = '<p class="hint">没有找到含图片的 Markdown 文件</p>';
+    return;
+  }
+  box.innerHTML = `<p class="hint" style="margin-top:12px">
+      发现 ${r.items.length} 个文件，预计视觉增强成本约 ${r.total_cost} 元</p>
+    <div class="filelist">` +
+    r.items.map(i => `<div><span>${i.name}</span>
+      <span class="cost">${i.images} 张图 / ${i.cost} 元</span></div>`).join('') +
+    '</div>';
+  log(`扫描完成：${r.items.length} 个文件，预估 ${r.total_cost} 元`);
+}
+
+async function doImport() {
+  const kb = document.getElementById('kb-name').value.trim();
+  const dir = document.getElementById('import-dir').value.trim();
+  const vision = document.getElementById('use-vision').checked;
+  if (!kb || !dir) { alert('请填写知识库名和文件夹路径'); return; }
+
+  if (vision) {
+    const r = await api.scan_dir(dir);
+    if (!r.ok || !r.items.length) { alert('没有可增强的文件'); return; }
+    const ok = confirm(`即将用 MiMo 识别 ${r.items.reduce((a, i) => a + i.images, 0)} 张图片，` +
+                       `预计花费 ${r.total_cost} 元。继续？`);
+    if (!ok) return;
+    const key = document.getElementById('api-key').value.trim();
+    const model = document.getElementById('model').value;
+    if (!key) { alert('请先在「配置」页填写 MiMo API Key'); return; }
+    await api.enhance(r.items.map(i => i.path), key, model);
+    log('视觉增强任务已启动，完成后会自动导入');
+  }
+  await api.import_dir(kb, dir, vision);
+}
+
+// ---------- 出题 ----------
+async function loadKbs() {
+  const r = await api.list_kbs();
+  const sel = document.getElementById('quiz-kb');
+  sel.innerHTML = (r.kbs || []).map(k => `<option>${k}</option>`).join('');
+  log('知识库列表：' + (r.kbs || []).join(', ') || '（无）');
+}
+
+async function doGenerate() {
+  const kb = document.getElementById('quiz-kb').value;
+  const topic = document.getElementById('quiz-topic').value.trim();
+  const count = parseInt(document.getElementById('quiz-count').value) || 5;
+  const diff = document.getElementById('quiz-diff').value;
+  if (!kb) { alert('请先选择知识库'); return; }
+  if (!topic) { alert('请填写知识点'); return; }
+  log(`开始出题：${topic}（${kb}，${count} 道）`);
+  await api.generate(kb, topic, count, diff);
+}
+
+waitApi();
+</script>
+</body>
+</html>
