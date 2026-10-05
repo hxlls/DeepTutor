@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from custom.winutil import no_window_kwargs  # noqa: E402
+
 
 def _web_dir() -> Path:
     """界面目录：打包后在 PyInstaller 的临时解压目录里。"""
@@ -64,17 +66,27 @@ class Api:
         from custom.gui.backend import check_env
         return check_env()
 
-    def save_key(self, api_key, model):
-        from custom.gui.backend import save_mimo_key, test_mimo
-        res = save_mimo_key(api_key, model)
+    def list_providers(self):
+        """返回可选的大模型服务，供界面渲染下拉框。"""
+        from custom.gui.backend import LLM_PROVIDERS
+        return {k: {'name': v['name'], 'models': v['models'],
+                    'default': v['default'], 'key_url': v['key_url'],
+                    'key_label': v.get('key_label', ''),
+                    'key_hint': v['key_hint'], 'base_url': v['base_url']}
+                for k, v in LLM_PROVIDERS.items()}
+
+    def save_key(self, api_key, provider='xiaomi_mimo', model='',
+                 base_url=''):
+        from custom.gui.backend import save_llm_config, test_llm
+        res = save_llm_config(api_key, provider, model, base_url)
         if res.get('ok'):
-            t = test_mimo(api_key, model)
-            res['test'] = t
+            res['test'] = test_llm(api_key, provider, model, base_url)
         return res
 
-    def test_key(self, api_key, model):
-        from custom.gui.backend import test_mimo
-        return test_mimo(api_key, model)
+    def test_key(self, api_key, provider='xiaomi_mimo', model='',
+                 base_url=''):
+        from custom.gui.backend import test_llm
+        return test_llm(api_key, provider, model, base_url)
 
     # ---------- 部署 ----------
 
@@ -214,7 +226,7 @@ class Api:
                 proc = subprocess.run(cmd, cwd=str(ROOT),
                                       capture_output=True, text=True,
                                       encoding='utf-8', errors='replace',
-                                      timeout=900)
+                                      timeout=900, **no_window_kwargs())
                 out = (proc.stdout or '')[-4000:]
                 self._emit('result', out or (proc.stderr or '')[-2000:])
             except Exception as e:

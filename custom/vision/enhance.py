@@ -11,6 +11,8 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -27,39 +29,64 @@ PROMPT = """这是一份中国中学试卷中的图片。请判断内容：
 - 装饰/水印/logo/空白：输出 EMPTY
 只输出结果本身，不要解释，不要引号。"""
 
+# 限流退避参数（MiMo 在并发过高时返回 429）
+MAX_RETRY = 5
+BASE_BACKOFF = 3.0
+
 
 def _describe(api_key: str, model: str, img: Path, timeout: int = 120) -> str:
-    """单张图片 → 文字。"""
+    """单张图片 → 文字。遇 429 指数退避重试。"""
     mime = MIME.get(img.suffix.lower())
     if not mime:
         return ''
     try:
         b64 = base64.b64encode(img.read_bytes()).decode()
-        payload = {
-            'model': model,
-            'messages': [{
-                'role': 'user',
-                'content': [
-                    {'type': 'text', 'text': PROMPT},
-                    {'type': 'image_url',
-                     'image_url': {'url': f'data:{mime};base64,{b64}'}},
-                ],
-            }],
-            'max_tokens': 400,
-        }
-        req = urllib.request.Request(
-            'https://api.xiaomimimo.com/v1/chat/completions',
-            data=json.dumps(payload).encode(),
-            headers={'Authorization': f'Bearer {api_key}',
-                     'Content-Type': 'application/json'},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read())
-        txt = (data['choices'][0]['message'].get('content') or '').strip()
-        txt = txt.replace('\n', ' ')
-        return '' if txt.upper() == 'EMPTY' else txt
     except Exception:
         return ''
+
+    payload = {
+        'model': model,
+        'messages': [{
+            'role': 'user',
+            'content': [
+                {'type': 'text', 'text': PROMPT},
+                {'type': 'image_url',
+                 'image_url': {'url': f'data:{mime};base64,{b64}'}},
+            ],
+        }],
+        'max_tokens': 400,
+    }
+    data = json.dumps(payload).encode()
+
+    for attempt in range(MAX_RETRY):
+        try:
+            req = urllib.request.Request(
+                'https://api.xiaomimimo.com/v1/chat/completions',
+                data=data,
+                headers={'Authorization': f'Bearer {api_key}',
+                         'Content-Type': 'application/json'},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                resp = json.loads(r.read())
+            txt = (resp['choices'][0]['message'].get('content') or '').strip()
+            txt = txt.replace('\n', ' ')
+            return '' if txt.upper() == 'EMPTY' else txt
+
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                wait = BASE_BACKOFF * (2 ** attempt)
+                time.sleep(wait)
+                continue
+            if e.code in (500, 502, 503, 504):
+                time.sleep(BASE_BACKOFF * (attempt + 1))
+                continue
+            return ''
+        except Exception:
+            if attempt < MAX_RETRY - 1:
+                time.sleep(BASE_BACKOFF)
+                continue
+            return ''
+    return ''
 
 
 def count_images(md_path: Path) -> tuple[int, int]:
@@ -79,9 +106,12 @@ def count_images(md_path: Path) -> tuple[int, int]:
 
 def enhance_markdown(md_path: Path, api_key: str,
                      model: str = 'mimo-v2.6-flash',
-                     workers: int = 4,
+                     workers: int = 2,
                      on_progress=None) -> dict:
-    """增强单个 Markdown，输出 <原名>.enriched.md。"""
+    """增强单个 Markdown，输出 <原名>.enriched.md。
+
+    workers 默认 2 —— MiMo 并发过高会返回 429，靠退避重试虽能恢复但很慢。
+    """
     def log(m):
         if on_progress:
             on_progress(str(m))

@@ -525,6 +525,7 @@ except Exception:
 # Some router modules load YAML settings at import time.
 from deeptutor.api.routers import (
     agent_config,
+    assistant,
     attachments,
     auth,
     book,
@@ -600,6 +601,7 @@ app.include_router(
     tags=["multi-user"],
     dependencies=_auth,
 )
+app.include_router(assistant.router, prefix="/api/assistant", tags=["assistant"], dependencies=_auth)
 app.include_router(question.router, prefix="/api/question", tags=["question"], dependencies=_auth)
 app.include_router(knowledge.router, prefix="/api", tags=["knowledge-bases"], dependencies=_auth)
 app.include_router(

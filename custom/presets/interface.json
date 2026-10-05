@@ -1,0 +1,13 @@
+{
+  "theme": "snow",
+  "language": "zh",
+  "sidebar_description": "✨ 试卷助手",
+  "sidebar_nav_order": {
+    "start": [
+      "/",
+      "/history",
+      "/knowledge-bases",
+      "/notebooks"
+    ]
+  }
+}
