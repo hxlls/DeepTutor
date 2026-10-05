@@ -53,6 +53,9 @@ def main():
         '--hidden-import', 'custom.vision.enhance',
         '--hidden-import', 'custom.importer',
         '--hidden-import', 'custom.importer.core',
+        # DeepTutor 本体（通过 custom.* 间接引用，需显式收集）
+        '--collect-submodules', 'deeptutor',
+        '--collect-data', 'deeptutor',
         # 排除用不到的大块依赖，显著减小体积
         '--exclude-module', 'tkinter',
         '--exclude-module', 'matplotlib',
