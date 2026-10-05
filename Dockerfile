@@ -179,6 +179,53 @@ COPY pyproject.toml ./
 COPY requirements/ ./requirements/
 COPY requirements.txt ./
 
+# 自定义扩展层（「试卷助手」的全部代码）。
+# deeptutor/api/routers/assistant.py 会 `from custom... import ...`，
+# 不 COPY 进来这些路由会在导入期就炸。
+#
+# 这里**不预装 MinerU**。它是「全本地部署」才需要的解析引擎，由开箱引导
+# 第 3 步按用户选择装进挂载卷（custom/importer/mineru_runner.py 的
+# _install_mineru → MINERU_HOME/venv）。预装会让选「标准部署」（走云端
+# 视觉模型）的用户白背 300MB 依赖，也违背「让用户选」的设计。
+COPY custom/ ./custom/
+
+# 应用核心补丁（MinerU 4.x 兼容 + 图注内联回正文），见 custom/patches/。
+#
+# 补丁**不提交进仓库** —— 核心文件在 git 里保持与官方一致，这样
+# `custom/sync_upstream.sh` 的 rebase 永不冲突。
+# 上游一旦改了锚点，这一步直接失败、构建中断（fail-fast），
+# 而不是产出一个「看起来能跑、但试卷公式搜不到」的镜像。
+#
+# 这一层只依赖上面的 deeptutor/ 与 custom/ 两个廉价层，
+# 不会让更早的 apt/pip 层缓存失效。
+RUN python3 custom/patches/apply_all.py
+
+# 时区与 MinerU 数据目录。放在最后，避免让上面昂贵的 apt/pip 层缓存失效。
+#   TZ           —— 官方镜像默认 UTC，会让界面时间差 8 小时、AI 回答
+#                   「今天几号」算错、定时任务按 UTC 触发。
+#   MINERU_HOME  —— MinerU 默认写 $HOME/.mineru，而容器里后端进程以
+#                   deeptutor(uid 1000) 运行、HOME 不可写，会 PermissionError。
+#                   指到 /app/data/.mineru：entrypoint 已 chown /app/data，
+#                   权限天然正确，且落在挂载卷上，重建容器不丢模型。
+#   HOME         —— supervisord 以 root 起（PID 1），子进程会继承 HOME=/root，
+#                   而 deeptutor 用户进不去 /root。modelscope SDK 写凭证缓存时
+#                   直接 Permission denied: '/root/.modelscope/credentials/cookies'，
+#                   外部只看到「模型下载失败」。这里显式改到用户自己的家目录。
+#   MODELSCOPE_CACHE —— 精准指定缓存目录，顺手让它落在挂载卷上（可持久化）
+ENV TZ=Asia/Shanghai \
+    HOME=/app/data/.mineru/home \
+    MINERU_HOME=/app/data/.mineru \
+    MODELSCOPE_CACHE=/app/data/.mineru/.modelscope \
+    PATH="/app/data/.mineru/venv/bin:${PATH}"
+# HOME 故意指到挂载卷里（/app/data/.mineru 已挂到宿主机），这样
+# venv、解析模型、modelscope 缓存与凭证全在一个挂载点内，
+# 容器重建后一个都不丢。指向 /home/deeptutor 的话凭证缓存会丢。
+# 上面 PATH 里的 venv/bin 是运行时才创建的（用户选「全本地部署」时装）。
+# 放进 PATH 是为了让 DeepTutor 内置的 MinerU 引擎能直接用
+# shutil.which("mineru") 找到它，不必再去配 local_cli_path。
+# 目录不存在时 PATH 里多一项没有副作用。
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
 # Create necessary directories (these will be overwritten by volume mounts)
 RUN mkdir -p \
     data/user/settings \
@@ -207,6 +254,11 @@ RUN mkdir -p \
 # skipped (no CAP_SETUID) and UID 1000 matches the typical host user.
 RUN groupadd --system --gid 1000 deeptutor \
     && useradd --system --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin deeptutor \
+    # --no-create-home 让 HOME 指向一个不存在的目录。MinerU 下载解析模型时
+    # 会调 modelscope SDK，SDK 要往 $HOME 写缓存，目录不存在就直接
+    # "Permission denied: '/home/deeptutor'"，外部只看到「模型下载失败」。
+    && mkdir -p /home/deeptutor \
+    && chown deeptutor:deeptutor /home/deeptutor \
     && chown -R deeptutor:deeptutor /app/data /app/web/.next
 
 # supervisord config is split into two files so the production and development
@@ -266,7 +318,39 @@ stdout_logfile_maxbytes=0
 stderr_logfile=/dev/fd/2
 stderr_logfile_maxbytes=0
 environment=NODE_ENV="production"
+
+# MinerU 本地解析服务。4.x 的 parse 依赖它常驻；官方解析路径不会自己
+# 拉起它，容器一重启官方那条路就全失败。这里托管起来。
+# server 是 daemonize 的，所以 startsecs=0 + autorestart=false：
+# 脚本跑完就退出，属于正常结束，不该被当成崩溃去重启。
+[program:mineru-server]
+command=/bin/bash /app/start-mineru.sh
+directory=/app
+user=deeptutor
+autostart=true
+autorestart=false
+startsecs=0
+stdout_logfile=/dev/fd/1
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/fd/2
+stderr_logfile_maxbytes=0
 EOF
+
+# 启动脚本：venv 不存在就静默跳过（用户还没走「全本地部署」引导）
+RUN cat > /app/start-mineru.sh <<'SCRIPT'
+#!/bin/bash
+MINERU=/app/data/.mineru/venv/bin/mineru
+if [ ! -x "$MINERU" ]; then
+    echo "[MinerU] not installed yet, skip"
+    exit 0
+fi
+cd /app/data/.mineru || exit 0
+echo "[MinerU] starting local parse server..."
+"$MINERU" server start || true
+exit 0
+SCRIPT
+
+RUN sed -i 's/\r$//' /app/start-mineru.sh && chmod +x /app/start-mineru.sh
 
 RUN sed -i 's/\r$//' /etc/supervisor/conf.d/programs.conf
 
