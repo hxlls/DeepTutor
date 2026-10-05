@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import MarkdownRenderer from "@/components/common/MarkdownRenderer";
+import SaveQuestionButton from "@/components/assistant/SaveQuestionButton";
 import {
   useAllFollowupThreads,
   useQuizFollowupController,
@@ -910,6 +911,15 @@ export default function QuizViewer({
               {q.question_type}
             </span>
           </div>
+
+          <SaveQuestionButton
+            question={q.question}
+            questionType={q.question_type ?? ""}
+            options={(q.options as Record<string, string>) ?? {}}
+            correctAnswer={q.correct_answer ?? ""}
+            explanation={q.explanation ?? ""}
+            userAnswer={getUserAnswer(q, ans)}
+          />
 
           {ans.submitted && (
             <div className="relative flex items-center gap-1">

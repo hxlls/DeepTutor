@@ -24,6 +24,7 @@ import type {
 import { listLinkedFolders } from "@/features/knowledge/api/folders";
 import ProcessLogs from "@/components/common/ProcessLogs";
 import LinkFolderModal from "./LinkFolderModal";
+import EnhancedImportButton from "@/components/assistant/EnhancedImportButton";
 
 interface KbLinkedFoldersSectionProps {
   kb: KnowledgeBase;
@@ -307,6 +308,10 @@ export default function KbLinkedFoldersSection({
           "Sync now imports new or modified supported files. Deleted or renamed source files are not removed yet.",
         )}
       </p>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <EnhancedImportButton kbName={kb.name} />
+      </div>
 
       <LinkFolderModal
         isOpen={linkOpen}

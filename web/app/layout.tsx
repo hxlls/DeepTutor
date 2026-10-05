@@ -8,6 +8,8 @@ import SettingsReturnTracker from "@/components/settings/SettingsReturnTracker";
 import { WorkspaceNavigation } from "@/components/workspaces/WorkspaceNavigation";
 import { AppShellProvider } from "@/context/AppShellContext";
 import { I18nClientBridge } from "@/i18n/I18nClientBridge";
+import OnboardingWizard from "@/components/assistant/OnboardingWizard";
+import ModelDownloadBanner from "@/components/assistant/ModelDownloadBanner";
 
 // Geist matches the public site (deeptutor.info) and stays crisp at the
 // small UI sizes the composer/toolbars use, unlike the rounder Jakarta.
@@ -60,7 +62,9 @@ export default function RootLayout({
           <MotionProvider>
             <I18nClientBridge>{children}</I18nClientBridge>
           </MotionProvider>
+          <ModelDownloadBanner />
           <ToastViewport />
+          <OnboardingWizard />
         </AppShellProvider>
       </body>
     </html>
