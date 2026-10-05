@@ -40,13 +40,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pywebview pyinstaller
-          # 完整安装：让 PyInstaller 能把运行时依赖一起收进包里
+          # 完整安装 + 解析引擎（图片描述能力依赖它）
           pip install -e .
+          pip install "deeptutor[parse-markitdown]"
         shell: pwsh
 
       - name: 生成运行时配置
         run: |
-          # 预生成 settings 骨架，避免用户首次运行报错
+          # 预生成 settings 骨架
           python -c "from deeptutor.services.setup.init import init_user_directories; init_user_directories(); print('settings OK')"
           python -c "import custom.gui.backend as b; print('backend OK')"
         shell: pwsh
@@ -55,6 +56,7 @@ jobs:
         run: |
           python -c "import webview; print('pywebview OK')"
           python -c "import deeptutor; print('deeptutor OK')"
+          python -c "import markitdown; print('markitdown OK')"
           python -c "import custom.vision.enhance as v; print('vision OK')"
         shell: pwsh
 
