@@ -267,8 +267,16 @@ async def _resolve_or_create_category(store: Any, name: str) -> tuple[dict[str, 
     existing = await store.find_category_by_name(name)
     if existing is not None:
         return existing, False
-    created = await store.create_category(name)
-    return created, True
+    try:
+        created = await store.create_category(name)
+        return created, True
+    except ValueError:
+        # Race: a parallel save_generated/organize just created this name.
+        # Re-resolve instead of failing the whole tool call.
+        again = await store.find_category_by_name(name)
+        if again is not None:
+            return again, False
+        raise
 
 
 async def _organize(
