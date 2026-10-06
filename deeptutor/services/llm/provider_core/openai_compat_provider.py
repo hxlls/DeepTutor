@@ -14,6 +14,7 @@ import secrets
 import string
 import sys
 import time
+import os
 from typing import TYPE_CHECKING, Any
 
 import json_repair
