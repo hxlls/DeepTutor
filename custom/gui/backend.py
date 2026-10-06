@@ -24,7 +24,16 @@ from custom.winutil import no_window_kwargs
 # ---------- 路径 ----------
 
 def repo_root() -> Path:
-    """DeepTutor 仓库根目录（本文件位于 <root>/custom/gui/backend.py）。"""
+    """DeepTutor 仓库根目录（本文件位于 <root>/custom/gui/backend.py）。
+
+    绿色包（Windows 免安装版）里 custom/ 位于 site-packages，文件位置推导
+    会指向 site-packages，导致配置写进包内而非 --home 数据目录；启动器
+    通过 DEEPTUTOR_ROOT 环境变量指回绿色包根，容器/源码树不设该变量，
+    行为与原先完全一致。
+    """
+    env = os.environ.get('DEEPTUTOR_ROOT')
+    if env:
+        return Path(env).resolve()
     return Path(__file__).resolve().parents[2]
 
 

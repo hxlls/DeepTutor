@@ -25,8 +25,11 @@ from pydantic import BaseModel, Field
 
 router = APIRouter()
 
-# custom/ 目录在仓库根下
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+# custom/ 目录在仓库根下。
+# 绿色包（Windows 免安装版）里本文件位于 site-packages，parents[3] 会指向
+# site-packages；启动器通过 DEEPTUTOR_ROOT 环境变量指回绿色包根，使
+# 配置/预设写入 --home 数据目录而非包内。容器/源码树不设该变量，行为不变。
+_REPO_ROOT = Path(os.environ.get('DEEPTUTOR_ROOT') or Path(__file__).resolve().parents[3])
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
