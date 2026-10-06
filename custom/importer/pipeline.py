@@ -80,23 +80,33 @@ def _settings_dir() -> Path:
 
 def _default_mimo_key() -> str:
     # api_key 未显式传入时，回退读取用户已配置的 MiMo key
+    # 兼容两种配置结构：旧版顶层 active_profile_id/models；新版 services.llm.profiles
     try:
         import json
         cfg = _settings_dir() / 'model_catalog.json'
         if not cfg.is_file():
             return ''
         data = json.loads(cfg.read_text(encoding='utf-8'))
+        models = data.get('models', [])
         active = data.get('active_profile_id', '') or 'xiaomi_mimo-llm'
-        for m in data.get('models', []):
+        if not models:
+            llm = (data.get('services') or {}).get('llm') or {}
+            active = llm.get('active_profile_id', '') or active
+            models = llm.get('profiles', [])
+        for m in models:
             if m.get('id') == active or m.get('provider') == 'xiaomi_mimo':
                 key = (m.get('api_key') or '').strip()
+                if key:
+                    return key
+        # 最后尝试 connections 里的 xiaomi_mimo
+        for c in data.get('connections', []):
+            if c.get('provider') == 'xiaomi_mimo':
+                key = (c.get('api_key') or '').strip()
                 if key:
                     return key
     except Exception:
         pass
     return ''
-
-
 def import_documents(kb_name: str, directory: str | Path,
                      api_key: str = '', model: str = 'mimo-v2.6-flash',
                      use_fallback: bool = True,
