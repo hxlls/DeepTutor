@@ -42,7 +42,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-ACTIONS = ("overview", "list", "organize", "unfile", "bookmark", "record")
+ACTIONS = ("overview", "list", "organize", "unfile", "bookmark", "record", "save_generated")
 
 FILTERS = ("all", "wrong", "bookmarked", "uncategorized")
 
@@ -401,6 +401,73 @@ def _partner_record_origin() -> tuple[str, str]:
     return origin_ref, title
 
 
+async def _save_generated(
+    store: Any,
+    *,
+    question: str,
+    question_type: str,
+    options: dict[str, str] | None,
+    correct_answer: str,
+    explanation: str,
+    topic: str,
+    category: str,
+) -> QuestionBankOutcome:
+    text = " ".join(str(question or "").split())
+    if not text:
+        return QuestionBankOutcome(
+            ok=False,
+            action="save_generated",
+            error="`question` is required — the generated problem text.",
+        )
+    if options:
+        text = text + "  " + "  ".join(f"{k}. {v}" for k, v in sorted(options.items()))
+    topic = (topic or "").strip()[:MAX_CATEGORY_NAME]
+    material = topic or (category or "").strip()[:MAX_CATEGORY_NAME] or "对话出题"
+    item = {
+        "origin_type": "external_import",
+        "origin_ref": f"assistant:{material}",
+        "question_id": _record_question_id(text),
+        "question": text[:MAX_RECORD_QUESTION],
+        "question_type": str(question_type or "").strip()[:100],
+        "correct_answer": _truncate(correct_answer, MAX_RECORD_FIELD),
+        "explanation": _truncate(explanation, MAX_RECORD_FIELD),
+        "user_answer": "",
+        "source": "deep_question",
+        "material_title": material,
+        "is_correct": True,
+    }
+    upserted = await store.upsert_notebook_entries(None, [item])
+    if not upserted:
+        return QuestionBankOutcome(
+            ok=False,
+            action="save_generated",
+            error="The bank rejected the entry; nothing was recorded.",
+        )
+    parts = [f"已保存 1 道题到题库（分类：{material}）。"]
+    summary: dict[str, Any] = {
+        "session_id": "",
+        "origin_type": "external_import",
+        "origin_ref": f"assistant:{material}",
+        "question_id": item["question_id"],
+        "source": "deep_question",
+    }
+    name = (category or "").strip()[:MAX_CATEGORY_NAME]
+    if name and name != material:
+        entry = await store.find_notebook_entry_by_origin(
+            "external_import", f"assistant:{material}", item["question_id"]
+        )
+        entry_id = int(entry["id"]) if entry and entry.get("id") is not None else None
+        if entry_id is None:
+            parts.append("Could not file it into a category (entry not found after recording).")
+        else:
+            category_row, created = await _resolve_or_create_category(store, name)
+            await store.link_entries_to_category([entry_id], int(category_row["id"]), link=True)
+            parts.append(f"已归入分类：{category_row['name']}。")
+            summary["category"] = category_row["name"]
+    parts.append("学习空间 → 题库 立即可见。")
+    return QuestionBankOutcome(ok=True, action="save_generated", text=" ".join(parts), summary=summary)
+
+
 async def _record(
     store: Any,
     *,
@@ -481,6 +548,8 @@ async def run_question_bank(
     correct_answer: str = "",
     explanation: str = "",
     question_type: str = "",
+    options: dict[str, str] | None = None,
+    topic: str = "",
     is_correct: bool = False,
     store: Any = None,
 ) -> QuestionBankOutcome:
@@ -510,6 +579,17 @@ async def run_question_bank(
                 entry_ids=entry_ids,
                 category=category,
                 link=verb == "organize",
+            )
+        if verb == "save_generated":
+            return await _save_generated(
+                resolved,
+                question=question,
+                question_type=question_type,
+                options=options,
+                correct_answer=correct_answer,
+                explanation=explanation,
+                topic=topic,
+                category=category,
             )
         if verb == "record":
             return await _record(

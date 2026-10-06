@@ -1163,6 +1163,10 @@ class QuestionBankTool(_PromptHintsMixin, BaseTool):
                 "action='record' to save one wrong question from this "
                 "conversation into the bank the learner reviews (add "
                 "`category` to file it in the same call); "
+                "action='save_generated' to save a question you just "
+                "generated or created in this conversation into the bank "
+                "(add `topic` for automatic topic grouping, `category` to "
+                "file it into a category in the same call); "
                 "action='organize' to file entry_ids into a category by name "
                 "(the category is created if it does not exist); "
                 "action='unfile' to remove them; "
@@ -1174,9 +1178,39 @@ class QuestionBankTool(_PromptHintsMixin, BaseTool):
                     type="string",
                     description=(
                         "'overview' (counts + categories, needs nothing else), "
-                        "'list', 'record', 'organize', 'unfile', or 'bookmark'."
+                        "'list', 'record', 'save_generated', 'organize', "
+                        "'unfile', or 'bookmark'."
                     ),
                     enum=list(QB_ACTIONS),
+                ),
+                ToolParameter(
+                    name="question_type",
+                    type="string",
+                    description=(
+                        "For action='record' / 'save_generated'. The question "
+                        "type, e.g. 'choice', 'short_answer', 'fill_blank'."
+                    ),
+                    required=False,
+                ),
+                ToolParameter(
+                    name="topic",
+                    type="string",
+                    description=(
+                        "For action='save_generated'. The knowledge point / "
+                        "topic this generated question covers — used as the "
+                        "automatic topic grouping in the bank."
+                    ),
+                    required=False,
+                ),
+                ToolParameter(
+                    name="options",
+                    type="object",
+                    description=(
+                        "For action='save_generated'. Multiple-choice options "
+                        "as a dict of label-to-text (e.g. A maps to the option "
+                        "text) when the generated question is a choice item."
+                    ),
+                    required=False,
                 ),
                 ToolParameter(
                     name="question",
@@ -1286,6 +1320,9 @@ class QuestionBankTool(_PromptHintsMixin, BaseTool):
             search=str(kwargs.get("search") or ""),
             entry_ids=kwargs.get("entry_ids"),
             question=str(kwargs.get("question") or ""),
+            question_type=str(kwargs.get("question_type") or ""),
+            options=kwargs.get("options") or None,
+            topic=str(kwargs.get("topic") or ""),
             user_answer=str(kwargs.get("user_answer") or ""),
             correct_answer=str(kwargs.get("correct_answer") or ""),
             explanation=str(kwargs.get("explanation") or ""),
