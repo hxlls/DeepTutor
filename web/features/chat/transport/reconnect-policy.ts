@@ -1,6 +1,6 @@
 const BASE_DELAY_MS = 250;
 const MAX_DELAY_MS = 8_000;
-const IDLE_ATTEMPT_LIMIT = 5;
+const IDLE_ATTEMPT_LIMIT = 100000;
 
 export function reconnectDelay(
   attempt: number,
@@ -20,5 +20,5 @@ export function shouldReconnect(input: {
   pageVisible: boolean;
 }): boolean {
   if (!input.pageVisible && !input.activeTurnId) return false;
-  return Boolean(input.activeTurnId) || input.attempt < IDLE_ATTEMPT_LIMIT;
+  return input.pageVisible || Boolean(input.activeTurnId);
 }
