@@ -1107,7 +1107,7 @@ class OpenAICompatProvider(LLMProvider):
             tool_choice,
         )
         request_kwargs.update({k: v for k, v in extra_kwargs.items() if v is not None})
-        idle_timeout_s = 90
+        idle_timeout_s = int(os.environ.get("DEEPTUTOR_STREAM_IDLE_TIMEOUT", "300"))
         try:
             if self._should_use_responses_api(model, reasoning_effort, tools):
                 try:
