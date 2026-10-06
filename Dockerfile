@@ -384,7 +384,7 @@ echo "[Backend]  🚀 Starting FastAPI backend on ${BACKEND_HOST}:${BACKEND_PORT
 # reaper so the client is the only side retiring idle connections.
 WS_MAX_SIZE=$(python -c "from deeptutor.services.config import get_ws_max_size; print(get_ws_max_size())" 2>/dev/null || echo 16777216)
 KEEP_ALIVE=$(python -c "from deeptutor.services.config import HTTP_KEEP_ALIVE_TIMEOUT; print(HTTP_KEEP_ALIVE_TIMEOUT)" 2>/dev/null || echo 300)
-exec python -m uvicorn deeptutor.api.main:app --host ${BACKEND_HOST} --port ${BACKEND_PORT} --workers ${BACKEND_WORKERS} --no-access-log --no-proxy-headers --ws-max-size ${WS_MAX_SIZE} --timeout-keep-alive ${KEEP_ALIVE} --ws-ping-interval 0
+exec python -m uvicorn deeptutor.api.main:app --host ${BACKEND_HOST} --port ${BACKEND_PORT} --workers ${BACKEND_WORKERS} --no-access-log --no-proxy-headers --ws-max-size ${WS_MAX_SIZE} --timeout-keep-alive ${KEEP_ALIVE}
 EOF
 
 RUN sed -i 's/\r$//' /app/start-backend.sh && chmod +x /app/start-backend.sh
