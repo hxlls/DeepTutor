@@ -269,11 +269,31 @@ async def model_links():
 # ---------- 模型部署 ----------
 
 _PROGRESS: list[dict] = []
-# 最近一次部署任务的起始下标与运行状态。
+# 最近一次后台任务的起始下标、运行状态与类型。
 # 前端刷新页面后 cursor 会归零，若直接从头拉取会把上一次任务的日志
 # （包括结尾的 done）也读进来，造成「刚打开就显示已完成」的误判。
 _TASK_START = 0
 _TASK_RUNNING = False
+# "deploy"（装模型）/ "import"（导试卷）/ None。
+# 两类任务的横幅文案完全不同，前端靠它决定显示哪一个。
+_TASK_KIND: str | None = None
+
+
+def _begin_task(kind: str) -> None:
+    """标记一个后台任务开始。
+
+    所有会跑很久的操作（部署模型、导入试卷）都必须走这里 ——
+    前端靠 ``_TASK_RUNNING`` 决定要不要显示进度条。
+    """
+    global _TASK_START, _TASK_RUNNING, _TASK_KIND
+    _TASK_START = len(_PROGRESS)
+    _TASK_RUNNING = True
+    _TASK_KIND = kind
+
+
+def _end_task() -> None:
+    global _TASK_RUNNING
+    _TASK_RUNNING = False
 
 
 def _emit(kind: str, msg: str = ""):
@@ -300,22 +320,20 @@ async def progress(since: int = 0):
         "total": len(_PROGRESS),
         "task_start": _TASK_START,
         "running": _TASK_RUNNING,
+        "kind": _TASK_KIND,
     }
 
 
 @router.post("/deploy-local")
 async def deploy_local(req: DeployRequest):
     """部署本地模型。standard = 仅 Ollama+bge-m3；full = 额外装 MinerU。"""
-    global _TASK_START, _TASK_RUNNING
-    _TASK_START = len(_PROGRESS)
-    _TASK_RUNNING = True
+    _begin_task("deploy")
 
     async def job():
-        global _TASK_RUNNING
         try:
             await _deploy_job(req)
         finally:
-            _TASK_RUNNING = False
+            _end_task()
 
     asyncio.create_task(job())
     return {"ok": True, "msg": "任务已启动", "task_start": _TASK_START}
@@ -469,6 +487,9 @@ async def import_docs(payload: dict):
     if not kb or not d:
         return {"ok": False, "msg": "缺少知识库名或目录"}
 
+    # 立刻返回，解析在后台跑。前端据此关闭弹窗，改由顶部任务条显示进度。
+    _begin_task("import")
+
     async def job():
         try:
             r = await asyncio.to_thread(
@@ -479,6 +500,8 @@ async def import_docs(payload: dict):
                 _emit("error", r.get("msg", "导入失败"))
         except Exception as e:
             _emit("error", f"导入异常：{e}")
+        finally:
+            _end_task()
 
     asyncio.create_task(job())
     return {"ok": True, "msg": "任务已启动"}
@@ -486,6 +509,39 @@ async def import_docs(payload: dict):
 
 # 单文件大小上限（前端也会拦一道，这里是服务端兜底）
 _MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+
+# 上传临时目录的前缀与最长存活时间。
+# 正常路径下 job 的 finally 会删掉自己的临时目录；但容器被强杀 / 进程崩时
+# 走不到 finally，残留会一直占磁盘（一份试卷夹可能几百 MB）。
+_UPLOAD_TMP_PREFIX = "deeptutor-upload-"
+_UPLOAD_TMP_MAX_AGE = 6 * 3600
+
+
+def _sweep_stale_uploads() -> int:
+    """清掉上次被中断留下的上传临时目录，返回清掉几个。
+
+    用 6 小时的年龄门槛，避免误删正在处理的目录。
+    """
+    import time
+
+    now = time.time()
+    removed = 0
+    try:
+        root = Path(tempfile.gettempdir())
+        for d in root.glob(f"{_UPLOAD_TMP_PREFIX}*"):
+            try:
+                if not d.is_dir():
+                    continue
+                if now - d.stat().st_mtime <= _UPLOAD_TMP_MAX_AGE:
+                    continue
+                shutil.rmtree(d, ignore_errors=True)
+                if not d.exists():
+                    removed += 1
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001 - 清扫失败绝不能影响导入
+        pass
+    return removed
 
 
 @router.post("/import-upload")
@@ -510,7 +566,11 @@ async def import_upload(
 
     from custom.importer import import_documents
 
-    tmp = Path(tempfile.mkdtemp(prefix="deeptutor-upload-"))
+    swept = _sweep_stale_uploads()
+    if swept:
+        _emit("info", f"清理了 {swept} 个上次中断留下的临时目录")
+
+    tmp = Path(tempfile.mkdtemp(prefix=_UPLOAD_TMP_PREFIX))
     saved = 0
     skipped: list[str] = []
 
@@ -551,6 +611,9 @@ async def import_upload(
     if skipped:
         _emit("info", f"跳过 {len(skipped)} 个：{'、'.join(skipped[:5])}")
 
+    # 上传已完成，解析交给后台。前端收到这个响应就关弹窗，不再阻塞。
+    _begin_task("import")
+
     async def job():
         try:
             r = await asyncio.to_thread(
@@ -565,6 +628,7 @@ async def import_upload(
         finally:
             # 临时目录用完即删 —— 原始文件用户本地还有一份
             shutil.rmtree(tmp, ignore_errors=True)
+            _end_task()
 
     asyncio.create_task(job())
     return {"ok": True, "msg": f"已接收 {saved} 个文件，开始处理",

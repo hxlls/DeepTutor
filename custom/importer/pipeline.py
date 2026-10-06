@@ -21,6 +21,21 @@ from .core import import_paths_sync, scan_files
 DOC_EXTS = ('.pdf', '.docx', '.pptx', '.xlsx', '.md')
 CONVERT_HINT = {'.doc': '.docx', '.ppt': '.pptx', '.xls': '.xlsx'}
 
+# 扫描时跳过的目录名。
+# `_mineru_out` / `mineru_out` 是**我们自己**生成的解析产物目录，
+# `images` 是导出的图片 —— 不跳过的话，导入一次之后再扫描，
+# 会把上次的产物当成新的源文件重复导入。
+SKIP_DIRS = frozenset({'_mineru_out', 'mineru_out', 'images', '__pycache__'})
+
+
+def _is_derived(path: Path, root: Path) -> bool:
+    """path 是否落在我们自己的产物目录里。"""
+    try:
+        parts = path.relative_to(root).parts[:-1]
+    except ValueError:
+        parts = path.parts[:-1]
+    return any(p in SKIP_DIRS for p in parts)
+
 
 def scan_documents(directory: str | Path) -> dict:
     """扫描目录，按类型分类文件。"""
@@ -31,6 +46,8 @@ def scan_documents(directory: str | Path) -> dict:
     docs, needs_convert, unknown = [], [], []
     for f in sorted(d.rglob('*')):
         if not f.is_file() or f.name.endswith('.enriched.md'):
+            continue
+        if _is_derived(f, d):
             continue
         ext = f.suffix.lower()
         if ext in DOC_EXTS:
@@ -94,6 +111,11 @@ def import_documents(kb_name: str, directory: str | Path,
         if not mineru_runner.prepare_mineru(on_progress):
             return {'ok': False, 'msg': 'MinerU 准备失败，请查看日志'}
 
+    # 兜底清扫：上一次导入若被强杀（容器重启、进程崩溃），
+    # job 的 finally 走不到，文档库里会留下孤儿记录和临时文件。
+    if need_mineru:
+        mineru_runner.cleanup_doclib(on_progress)
+
     prepared: list[Path] = []
     skipped = 0
     total = len(docs)
@@ -113,6 +135,10 @@ def import_documents(kb_name: str, directory: str | Path,
             # MinerU 4.x 的图片是文档库定位符，先导出成本地文件，
             # 后续视觉兜底与入库才能拿到真实图片
             md = mineru_runner.materialize_images(md, on_progress=on_progress)
+            # 图片已落地、markdown 已生成，文档库里这份记录不再需要。
+            # 不回收的话 MINERU_HOME/doclib 会随每份试卷单调增长 ——
+            # MinerU 自己没有任何自动淘汰机制。
+            mineru_runner.forget_source(path, on_progress)
 
         # ② 检查残留图片引用
         from custom.vision import count_images
@@ -148,6 +174,12 @@ def import_documents(kb_name: str, directory: str | Path,
             log(f'  已导入 {ok_count}/{len(prepared)}')
         except Exception as e:
             log(f'  导入失败：{e}')
+
+    # ④ 回收文档库
+    # forget 只做标记，真正的磁盘回收要在这里统一做（见 mineru_runner 的说明）。
+    # 放在批量结束而不是每份之后，是为了少起几次 CLI 进程。
+    if need_mineru:
+        mineru_runner.cleanup_doclib(on_progress)
 
     log(f'导入完成：成功 {ok_count}，跳过 {skipped}')
     return {'ok': True, 'imported': ok_count, 'skipped': skipped}

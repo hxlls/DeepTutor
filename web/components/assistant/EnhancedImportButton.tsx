@@ -8,13 +8,17 @@
  *   · Markdown 目录                 → 直接检查图片引用 → MiMo 兜底
  *
  * 引擎选择由引导时确定的部署方式决定，这里只展示当前用的是哪个。
+ *
+ * ⚠️ 本弹窗**只负责提交**：请求一返回（服务端已 `create_task`）就自动关闭，
+ *    解析在后台继续跑，进度由顶部的 BackgroundTaskBar 显示。
+ *    早先的版本会一直轮询日志、并把关闭按钮锁到"导入完成"，
+ *    用户被迫盯着进度条 —— 那是错的，几十份试卷要跑十几分钟。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   FileText,
   FolderOpen,
-  Image as ImageIcon,
   Loader2,
   Sparkles,
   X,
@@ -86,12 +90,13 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
   const [dir, setDir] = useState("");
   const [scanning, setScanning] = useState(false);
   const [scan, setScan] = useState<ScanDocsResult | null>(null);
-  const [running, setRunning] = useState(false);
+  // 只覆盖「上传 + 提交」这段。提交成功后服务端已经 create_task，
+  // 前端不再等待，所以这个状态会立刻归位。
+  const [submitting, setSubmitting] = useState(false);
   const [useFallback, setUseFallback] = useState(true);
-  const [logs, setLogs] = useState<string[]>([]);
-  const [cursor, setCursor] = useState(0);
-  const [done, setDone] = useState(false);
-  const logRef = useRef<HTMLDivElement>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  // 打开弹窗时若已有导入任务在后台跑，给个提示，避免重复提交
+  const [busyInBackground, setBusyInBackground] = useState(false);
 
   // 从浏览器直接选文件夹（拿不到绝对路径，所以走上传）
   const dirInputRef = useRef<HTMLInputElement>(null);
@@ -108,45 +113,35 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
     }
   }, []);
 
+  // 打开时探一次：是否已有导入任务在后台运行
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await requestJson<{
+          running: boolean;
+          kind: string | null;
+        }>("/api/assistant/progress");
+        if (!cancelled) {
+          setBusyInBackground(r.running && r.kind === "import");
+        }
+      } catch {
+        /* 忽略：探测失败不影响导入 */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
   const onPickDir = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const all = Array.from(e.target.files ?? []);
     setPicked(all.filter((f) => DOC_RE.test(f.name)));
     setScan(null);
-    setDone(false);
+    setNotice(null);
     setUploadPct(0);
   }, []);
-
-  const append = useCallback((line: string) => {
-    setLogs((prev) => [...prev.slice(-300), line]);
-  }, []);
-
-  // 轮询进度
-  useEffect(() => {
-    if (!running) return;
-    const timer = setInterval(async () => {
-      try {
-        const r = await requestJson<{ logs: { msg: string }[]; total: number }>(
-          `/api/assistant/progress?since=${cursor}`,
-        );
-        if (r.logs?.length) {
-          r.logs.forEach((l) => append(l.msg));
-          setCursor(r.total);
-          const last = r.logs[r.logs.length - 1];
-          if (last.msg.includes("导入完成") || last.msg.includes("完成：")) {
-            setDone(true);
-            setRunning(false);
-          }
-        }
-      } catch {
-        /* 忽略 */
-      }
-    }, 1500);
-    return () => clearInterval(timer);
-  }, [running, cursor, append]);
-
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [logs]);
 
   const doScan = async () => {
     if (!dir.trim()) {
@@ -155,7 +150,7 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
     }
     setScanning(true);
     setScan(null);
-    setDone(false);
+    setNotice(null);
     try {
       const r = await requestJson<ScanDocsResult>("/api/assistant/scan-docs", {
         method: "POST",
@@ -180,31 +175,29 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
     const fromBrowser = picked.length > 0;
     if (!fromBrowser && !scan?.docs?.length) return;
 
-    setRunning(true);
-    setLogs([]);
-    setCursor(0);
+    setSubmitting(true);
+    setNotice(null);
     setUploadPct(0);
-    setDone(false);
 
     try {
       if (fromBrowser) {
-        // 浏览器选的文件：先传上去，再由服务端走同一套增强导入
+        // 浏览器选的文件：先传上去，再由服务端走同一套增强导入。
+        // 上传本身要时间（几十上百 MB），这段必须等；
+        // 但服务端一收到就返回，后面的解析不在请求里。
         const form = new FormData();
         form.append("kb", kbName);
         form.append("use_fallback", String(useFallback));
         picked.forEach((f) =>
           form.append("files", f, f.webkitRelativePath || f.name),
         );
-        append(`正在上传 ${picked.length} 个文件（${fmtSize(pickedTotal)}）...`);
         const r = (await uploadWithProgress(
           apiUrl("/api/assistant/import-upload"),
           form,
           setUploadPct,
         )) as { ok?: boolean; msg?: string; received?: number } | null;
         if (!r?.ok) throw new Error(r?.msg || "上传失败");
-        append(`已上传 ${r.received ?? picked.length} 个文件，开始解析...`);
       } else {
-        await requestJson("/api/assistant/import-docs", {
+        const r = (await requestJson("/api/assistant/import-docs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -212,13 +205,18 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
             dir: dir.trim(),
             use_fallback: useFallback,
           }),
-        });
-        append("导入任务已启动...");
+        })) as { ok?: boolean; msg?: string } | null;
+        if (!r?.ok) throw new Error(r?.msg || "提交失败");
       }
+
+      // 服务端已 create_task，解析在后台跑 —— 立刻放人走
+      setPicked([]);
+      setOpen(false);
       onDone?.();
     } catch (e) {
-      append(`失败: ${e}`);
-      setRunning(false);
+      setNotice(`失败：${e}`);
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -241,9 +239,10 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-base font-medium">增强导入 · {kbName}</h3>
           <button
-            onClick={() => !running && setOpen(false)}
-            disabled={running}
+            onClick={() => setOpen(false)}
+            disabled={submitting}
             className="rounded p-1 hover:bg-[var(--muted)] disabled:opacity-40"
+            title={submitting ? "正在上传，请稍候" : "关闭"}
           >
             <X className="h-4 w-4" />
           </button>
@@ -252,7 +251,17 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
         <p className="mb-4 text-xs text-[var(--muted-foreground)]">
           支持 PDF / Word / PPT / Excel，会自动解析公式（MinerU）
           并补齐残留图片内容（视觉模型）。
+          <br />
+          <span className="text-sky-600 dark:text-sky-400">
+            提交后会在后台运行，进度显示在页面顶部 —— 可以直接关掉这个窗口去做别的。
+          </span>
         </p>
+
+        {busyInBackground && (
+          <div className="mb-3 rounded-lg border border-sky-300 bg-sky-50 p-2 text-xs text-sky-800 dark:border-sky-900 dark:bg-sky-950/30 dark:text-sky-300">
+            已有导入任务正在后台运行，进度见页面顶部。重复提交会排在一起处理。
+          </div>
+        )}
 
         {/* 方式一：服务器上已有的文件夹 */}
         <div className="mb-2 flex gap-2">
@@ -260,12 +269,12 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
             value={dir}
             onChange={(e) => setDir(e.target.value)}
             placeholder="/srv/试卷（服务器上的路径）"
-            disabled={running}
+            disabled={submitting}
             className="flex-1 rounded-lg border border-[var(--border)] bg-transparent px-3 py-2 text-sm outline-none focus:border-[var(--primary)]"
           />
           <button
             onClick={doScan}
-            disabled={scanning || running}
+            disabled={scanning || submitting}
             className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm hover:bg-[var(--muted)] disabled:opacity-50"
           >
             {scanning ? <Loader2 className="h-4 w-4 animate-spin" /> : "扫描"}
@@ -286,12 +295,12 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
             type="file"
             multiple
             onChange={onPickDir}
-            disabled={running}
+            disabled={submitting}
             className="hidden"
           />
           <button
             onClick={() => dirInputRef.current?.click()}
-            disabled={running}
+            disabled={submitting}
             className="inline-flex items-center gap-2 rounded-lg border border-[var(--border)] px-4 py-2 text-sm hover:bg-[var(--muted)] disabled:opacity-50"
           >
             <FolderOpen className="h-4 w-4" />
@@ -302,7 +311,7 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
               <span className="text-xs text-[var(--muted-foreground)]">
                 已选 <b>{picked.length}</b> 个文档 · {fmtSize(pickedTotal)}
               </span>
-              {!running && (
+              {!submitting && (
                 <button
                   onClick={() => setPicked([])}
                   className="text-xs text-[var(--muted-foreground)] underline"
@@ -330,6 +339,12 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
 
         {/* 扫描结果 */}
         <div className="min-h-0 flex-1 overflow-y-auto">
+          {notice && (
+            <p className="mb-3 rounded-lg border border-red-300 bg-red-50 p-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+              {notice}
+            </p>
+          )}
+
           {scan && !scan.ok && (
             <p className="mb-3 text-sm text-red-500">{scan.msg}</p>
           )}
@@ -392,7 +407,7 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
                 type="checkbox"
                 checked={useFallback}
                 onChange={(e) => setUseFallback(e.target.checked)}
-                disabled={running}
+                disabled={submitting}
                 className="h-4 w-4"
               />
               <span>
@@ -403,35 +418,27 @@ export default function EnhancedImportButton({ kbName, onDone }: Props) {
               </span>
             </label>
           )}
-
-          {/* 日志 */}
-          {logs.length > 0 && (
-            <div
-              ref={logRef}
-              className="max-h-48 overflow-y-auto rounded-lg bg-black/80 p-3 font-mono text-xs leading-relaxed text-green-300"
-            >
-              {logs.map((l, i) => (
-                <div key={i}>{l}</div>
-              ))}
-            </div>
-          )}
         </div>
 
         <div className="mt-4 flex justify-end gap-2 border-t border-[var(--border)] pt-4">
           <button
             onClick={() => setOpen(false)}
-            disabled={running}
+            disabled={submitting}
             className="rounded-lg px-4 py-2 text-sm hover:bg-[var(--muted)] disabled:opacity-40"
           >
-            {done ? "关闭" : "取消"}
+            取消
           </button>
           <button
             onClick={doImport}
-            disabled={running || (!picked.length && !scan?.docs?.length)}
+            disabled={submitting || (!picked.length && !scan?.docs?.length)}
             className="inline-flex items-center gap-2 rounded-lg bg-[var(--primary)] px-4 py-2 text-sm text-[var(--primary-foreground)] disabled:opacity-50"
           >
-            {running && <Loader2 className="h-4 w-4 animate-spin" />}
-            {running ? "处理中…" : done ? "已完成" : "开始导入"}
+            {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+            {submitting
+              ? picked.length
+                ? "上传中…"
+                : "提交中…"
+              : "开始导入"}
           </button>
         </div>
       </div>

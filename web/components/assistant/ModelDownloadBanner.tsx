@@ -5,7 +5,10 @@
  *
  * 引导页点「开始部署」后不再阻塞，立即进入主界面；
  * 本组件轮询 /api/assistant/progress，把进度显示在顶部。
- * 下载完成后横幅变成「已就绪」并在几秒后自动消失。
+ * 下载完成后横幅变成「已就绪」，等用户自己关掉（里面有手动下载清单）。
+ *
+ * ⚠️ 只管「装模型」。导入试卷的任务由 BackgroundTaskBar 显示 ——
+ *    两者都钉在 top-0，靠 /progress 的 kind 字段分工，不能同时出现。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -37,7 +40,12 @@ export default function ModelDownloadBanner() {
         total: number;
         task_start: number;
         running: boolean;
+        kind: string | null;
       }>(`/api/assistant/progress?since=${cursor}`);
+
+      // 导入试卷的任务交给 BackgroundTaskBar —— 两者都钉在 top-0，
+      // 不分工的话会叠在一起，而且文案也不对（"正在下载模型"）。
+      if (r.kind === "import") return;
 
       // 首次拉取（cursor=0）时跳过历史日志，只跟最近一次任务。
       // 否则刷新页面会把上一次任务（结尾是 done）整段读进来，

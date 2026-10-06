@@ -287,3 +287,8 @@ dmypy.json
 *.ogg
 blobs/
 Dockerfile.local
+
+# 本地调试脚本与临时试卷（不入库）
+/_diag.py
+/_q2.docx
+/_t_*.py

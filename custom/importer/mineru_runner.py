@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -687,6 +688,42 @@ def count_locators(md_path: Path) -> int:
     return len(LOCATOR_RE.findall(md_path.read_text(encoding='utf-8')))
 
 
+# MinerU 会把图片的**文字内容**内联成这样一个块：
+#     <details><summary>image content</summary>...</details>
+_DETAILS_RE = re.compile(
+    r'<details>\s*<summary>\s*image content\s*</summary>(.*?)</details>',
+    re.DOTALL | re.IGNORECASE)
+
+
+def _dedupe_details(text: str, log) -> str:
+    """去掉内容重复的「image content」块。
+
+    MinerU 在 markdown 里把每个图片块的文字内容内联成 ``<details>``。
+    但**水印 / 页眉页脚会逐页重复** —— 实测一份 8 页的试卷里，
+    同一个「新课标第一网」水印出现了 **47 次**。留着只会稀释检索结果，
+    让「新课标第一网」这种词变成文档里最高频的 token。
+
+    规则：内容（归一化空白后）完全相同的只保留第一处。
+    真正不同的图注内容各不相同，不受影响。
+    """
+    seen: set[str] = set()
+    dropped = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal dropped
+        body = ' '.join(m.group(1).split())
+        if not body or body in seen:
+            dropped += 1
+            return ''
+        seen.add(body)
+        return m.group(0)
+
+    out = _DETAILS_RE.sub(repl, text)
+    if dropped:
+        log(f'  去掉 {dropped} 个重复的图片内容块（水印/页眉页脚）')
+    return out
+
+
 def materialize_images(md_path: Path, on_progress=None,
                        workers: int = 4) -> Path:
     """把文档库定位符图片导出成本地文件，并改写 Markdown 引用。
@@ -695,6 +732,13 @@ def materialize_images(md_path: Path, on_progress=None,
         ![Image block](doc:ab12cd3/tier:standard/page:1/block:2)
     这里用 `mineru read -f image` 导出到 <md 同级>/images/，
     并把引用改写成标准相对路径，供后续视觉兜底与入库使用。
+
+    ⚠️ 不是所有定位符都是位图。docx 只能走 `--tier flash`（MinerU 的硬限制），
+    该档不做视觉模型，很多 block 其实是水印/页眉的 OCR 结果，
+    `-f image` 会报 ``cannot identify image file``。这种情况**不能**把引用
+    替换成 alt 文本（"Image block"）—— 那会在正文里留下几十行噪音。
+    正确做法是直接删掉引用：这些块的文字内容 MinerU 已经内联成
+    ``<details><summary>image content</summary>`` 紧跟在后面了，不会丢。
     """
     def log(msg):
         if on_progress:
@@ -708,7 +752,7 @@ def materialize_images(md_path: Path, on_progress=None,
     locators = list(dict.fromkeys(
         mo.group(2) for mo in LOCATOR_RE.finditer(text)))  # 去重保序
     if not locators:
-        return md_path
+        return _rewrite(md_path, _dedupe_details(text, log))
 
     mineru = _bin('mineru')
     if mineru is None:
@@ -734,15 +778,213 @@ def materialize_images(md_path: Path, on_progress=None,
     with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(export, enumerate(locators, 1)))
 
-    if not mapping:
-        log('图片导出失败，保留原引用')
-        return md_path
-
     def repl(m: re.Match) -> str:
         name = mapping.get(m.group(2))
-        return f'![{m.group(1)}](images/{name})' if name else m.group(1)
+        if name:
+            return f'![{m.group(1)}](images/{name})'
+        # 导出失败 = 这个 block 不是位图（见函数 docstring）。
+        # 它的文字内容 MinerU 已经内联成紧跟其后的 <details> 块，
+        # 所以这里直接删掉引用。**不能**返回 m.group(1)（alt 文本），
+        # 那会在正文里留下几十行 "Image block" 噪音。
+        return ''
 
-    out = LOCATOR_RE.sub(repl, text)
+    out = _dedupe_details(LOCATOR_RE.sub(repl, text), log)
     md_path.write_text(out, encoding='utf-8')
-    log(f'图片已导出：{len(mapping)}/{len(locators)}')
+    log(f'图片已导出：{len(mapping)}/{len(locators)}'
+        + (f'，另 {len(locators) - len(mapping)} 个不是位图（内容已内联）'
+           if len(mapping) < len(locators) else ''))
     return md_path
+
+
+def _rewrite(md_path: Path, text: str) -> Path:
+    """只做内容清洗、不碰图片引用（没有定位符时的快路径）。"""
+    if text != md_path.read_text(encoding='utf-8'):
+        md_path.write_text(text, encoding='utf-8')
+    return md_path
+
+
+# ---------- 文档库回收 ----------
+#
+# MinerU 4.x 是「文档库」模型：每次 parse 都把解析结果（markdown + 图片 +
+# 索引）**永久**写进 MINERU_HOME/{doclib,blobs}，且没有任何自动淘汰。
+# 我们只需要它的 markdown 产物（已经落盘并入库），源文件记录留着纯占空间 ——
+# 一份试卷几 MB 到几十 MB，几百份就能把磁盘堆满。
+#
+# 下面两个函数负责回收。分工：
+#   forget_source()  —— 精准回收（每份处理完立刻调用）
+#   cleanup_doclib() —— 兜底清扫（批量导入开始时调一次）
+
+def _doclib_size() -> int:
+    """文档库（doclib + blobs）当前占用的字节数。"""
+    total = 0
+    for sub in ('doclib', 'blobs'):
+        root = mineru_home() / sub
+        if not root.is_dir():
+            continue
+        for p in root.rglob('*'):
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _fmt_bytes(n: float) -> str:
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if n < 1024 or unit == 'GB':
+            return f'{n:.1f} {unit}'
+        n /= 1024
+    return f'{n:.1f} GB'
+
+
+def forget_source(path: Path, on_progress=None) -> bool:
+    """把源文件从 MinerU 文档库里标记为删除。
+
+    ⚠️ 时机很重要：必须在 ``materialize_images()`` **之后**调用 ——
+    导出图片要靠文档库里的定位符，提前忘掉就拿不到图了。
+    也必须在**源文件还在**的时候调用 —— 实测 forget 是按路径匹配的，
+    文件已被删掉时会报 ``matched_as=none``，什么都忘不掉。
+    （上传路径的临时目录会在导入结束后删除，所以这里必须及时。）
+
+    ⚠️ forget **只标记、不释放磁盘**。真正回收要靠 ``cleanup_doclib()``。
+
+    代价：源文件的解析缓存一并清掉，下次导入同一份会重新解析。
+    这是有意的取舍 —— 磁盘被堆满比多解析一次严重得多。
+    """
+    def log(msg):
+        if on_progress:
+            on_progress(str(msg))
+
+    mineru = _bin('mineru')
+    if mineru is None:
+        return False
+
+    # forget 默认是 dry-run（只预览），必须显式关掉
+    rc, out = _run([str(mineru), 'forget', str(path), '--no-dry-run'],
+                   timeout=180, cwd=_server_cwd())
+    if rc != 0:
+        log(f'  文档库回收失败（{path.name}）：{out.strip()[:120]}')
+        return False
+    return True
+
+
+def _prune_parsed_cache(mineru: Path, log) -> int:
+    """删掉 ``doclib/parsed/`` 下已不在文档库里的解析数据，返回删了几份。
+
+    为什么必须自己扫：实测 MinerU 4.0.10 的 ``forget`` / ``cleanup`` 三条子命令
+    **都不会动这个目录** —— forget 之后 doclib 体积一个字节都不变。
+    而它恰恰是大头：6 份 docx 就占了 8.5MB，几百份试卷会到几百 MB。
+
+    目录名就是文档的 sha256，和 ``mineru list docs --json`` 的 ``sha256``
+    字段对齐，所以「不在列表里」= 已经被 forget 掉的，可以安全删。
+
+    安全阀：列表拿不到或格式不对时**直接返回**，绝不猜着删。
+    """
+    parsed = mineru_home() / 'doclib' / 'parsed'
+    if not parsed.is_dir():
+        return 0
+
+    rc, out = _run([str(mineru), 'list', 'docs', '--json'],
+                   timeout=180, cwd=_server_cwd())
+    if rc != 0:
+        log(f'  解析缓存清理跳过：读不到文档库列表（{out.strip()[:80]}）')
+        return 0
+    try:
+        payload = json.loads(out)
+        if not isinstance(payload, dict) or 'docs' not in payload:
+            raise ValueError('响应里没有 docs 字段')
+        live = {d['sha256'] for d in payload['docs'] if d.get('sha256')}
+    except (ValueError, KeyError, TypeError) as e:
+        log(f'  解析缓存清理跳过：文档库列表解析失败（{e}）')
+        return 0
+
+    removed = 0
+    for entry in parsed.iterdir():
+        if not entry.is_dir() or entry.name in live:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        if not entry.exists():
+            removed += 1
+    return removed
+
+
+# MinerU 的日志是纯追加、**不轮转**的：实测跑几次导入 doclib.log 就到 1.1MB、
+# doclib.stderr.log 987KB，且一直在涨。超过上限就截断。
+#
+# 截断是安全的：logging.FileHandler 以 append 模式打开，每次写都落在文件末尾，
+# 清空后下次写就是新内容，不会产生空洞。
+_LOG_CAP_BYTES = 5 * 1024 * 1024
+
+
+def _cap_logs() -> int:
+    """把超限的 MinerU 日志截断，返回释放的字节数。"""
+    logs_dir = mineru_home() / 'logs'
+    if not logs_dir.is_dir():
+        return 0
+    freed = 0
+    for f in logs_dir.glob('*.log'):
+        try:
+            size = f.stat().st_size
+            if size <= _LOG_CAP_BYTES:
+                continue
+            with f.open('w', encoding='utf-8'):
+                pass                      # 截断到 0
+            freed += size
+        except OSError:
+            pass
+    return freed
+
+
+def cleanup_doclib(on_progress=None) -> int:
+    """回收 MinerU 文档库占用的空间，返回回收的字节数。
+
+    为什么是四步 —— 实测（MinerU 4.0.10），缺一步都收不干净：
+
+      ① ``cleanup deleted-files``  删掉 ``forget`` 标记的行
+                                    ⚠️ 默认 dry-run，必须 ``--no-dry-run``
+      ② ``cleanup orphan-docs``    删掉没有任何 file 记录引用的 doc
+                                    ⚠️ 同样默认 dry-run
+      ③ ``cleanup temp``           删 ``doclib/temp/read-assets/`` 里的中间图片
+                                    ⚠️ 默认阈值 **7 天**，等于永不清理；
+                                       materialize_images 每导出一次图片就写一个
+                                       PNG，6 份试卷已经 108 个文件 5.6MB
+      ④ ``_prune_parsed_cache()``  删 ``doclib/parsed/`` 里的解析数据
+                                    上面三条都不碰它
+      ⑤ ``_cap_logs()``            截断不轮转的 ``logs/doclib*.log``
+                                    （实测几次导入就 2.2MB，且一直在涨）
+
+    best-effort —— 任何一步失败都不影响导入。
+    """
+    def log(msg):
+        if on_progress:
+            on_progress(str(msg))
+
+    mineru = _bin('mineru')
+    if mineru is None:
+        return 0
+
+    before = _doclib_size()
+
+    for label, args in (
+        ('已删除记录', ['cleanup', 'deleted-files', '--no-dry-run']),
+        ('孤儿文档', ['cleanup', 'orphan-docs', '--no-dry-run']),
+        ('中间文件', ['cleanup', 'temp', '--older-than', '0']),
+    ):
+        rc, out = _run([str(mineru), *args], timeout=300, cwd=_server_cwd())
+        if rc != 0:
+            log(f'  文档库清理（{label}）跳过：{out.strip()[:100]}')
+
+    pruned = _prune_parsed_cache(mineru, log)
+    log_capped = _cap_logs()
+
+    freed = before - _doclib_size() + log_capped
+    if freed > 0 or pruned:
+        bits = []
+        if pruned:
+            bits.append(f'清掉 {pruned} 份解析缓存')
+        if log_capped:
+            bits.append(f'截断日志 {_fmt_bytes(log_capped)}')
+        detail = f'（{"，".join(bits)}）' if bits else ''
+        log(f'  文档库回收 {_fmt_bytes(freed)}{detail}')
+    return freed
