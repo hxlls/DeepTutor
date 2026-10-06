@@ -361,6 +361,45 @@ class QuizPair:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+async def _save_qa_pairs_to_bank(qa_pairs: list[QuizPair]) -> int:
+    # 把出题结果自动写入题库（按主题自动分类），失败不影响出题流程
+    try:
+        if not qa_pairs:
+            return 0
+        from deeptutor.services.session import get_sqlite_session_store
+        store = get_sqlite_session_store()
+        items = []
+        for qa in qa_pairs:
+            text = (qa.question or "").strip()
+            if not text:
+                continue
+            opts = qa.options or {}
+            if isinstance(opts, dict) and opts:
+                text = text + "\n" + "  ".join(f"{k}. {v}" for k, v in sorted(opts.items()))
+            topic = str(qa.topic or qa.question_type or "对话出题").strip()[:200] or "对话出题"
+            items.append({
+                "origin_type": "external_import",
+                "origin_ref": f"assistant:{topic}",
+                "question_id": str(abs(hash(text)) % (10 ** 16)),
+                "question": text[:4000],
+                "question_type": str(qa.question_type or "")[:100],
+                "correct_answer": str(qa.correct_answer or "")[:1000],
+                "explanation": str(qa.explanation or "")[:2000],
+                "user_answer": "",
+                "source": "deep_question",
+                "material_title": topic,
+                "is_correct": True,
+            })
+        if not items:
+            return 0
+        n = await store.upsert_notebook_entries(None, items)
+        logger.info("出题自动入库 %d 道（分类 %s）", n, items[0]["material_title"])
+        return n
+    except Exception:
+        logger.exception("save questions to bank failed")
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # QuestionPipeline
 # ---------------------------------------------------------------------------
@@ -611,6 +650,7 @@ class QuestionPipeline:
             plan, qa_pairs, is_mimic=is_mimic, finish_text=finish_text
         )
         await emit_capability_result(stream, result_payload, source=SOURCE, usage=self.usage)
+        await _save_qa_pairs_to_bank(qa_pairs)
         return result_payload
 
     # ------------------------------------------------------------------

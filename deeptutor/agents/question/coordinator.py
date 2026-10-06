@@ -89,9 +89,7 @@ class AgentCoordinator:
                 stream=stream,
             ),
         )
-        summary = self._legacy_summary(result)
-        await self._save_questions_to_bank(summary)
-        return summary
+        return self._legacy_summary(result)
 
     async def generate_from_exam(
         self,
@@ -145,7 +143,6 @@ class AgentCoordinator:
             )
             summary = self._legacy_summary(result)
             summary["trace"] = trace
-            await self._save_questions_to_bank(summary)
             return summary
         except Exception as exc:
             logger.exception("Legacy AgentCoordinator.generate_from_exam failed: %s", exc)
