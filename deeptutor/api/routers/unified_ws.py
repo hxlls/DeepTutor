@@ -69,7 +69,8 @@ async def unified_websocket(ws: WebSocket) -> None:
         try:
             payload = {**data, "protocol_version": PROTOCOL_VERSION}
             await ws.send_text(json.dumps(payload, ensure_ascii=False, default=str))
-        except Exception:
+        except Exception as exc:
+            logger.error("WS send failed (closing socket): %s", exc)
             closed = True
 
     async def send_protocol_error(
@@ -372,7 +373,7 @@ async def unified_websocket(ws: WebSocket) -> None:
             )
 
     except WebSocketDisconnect:
-        logger.debug("Client disconnected from /ws")
+        logger.info("WS client disconnected from /ws")
     except Exception as exc:
         logger.error("Unified WS error: %s", exc, exc_info=True)
         await send_error(str(exc), error_code="internal_error", retryable=True)
