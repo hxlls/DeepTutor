@@ -794,20 +794,31 @@ class TurnRequestPreparer:
             if replace_assistant_message_id is not None:
                 if not await self.store.delete_message(replace_assistant_message_id):
                     raise RuntimeError("Unable to replace the previous assistant message")
-            async with self._lock:
-                from deeptutor.services.workspace.activity import acquire_activity
+            # Startup lock is shared by every concurrent turn admission in this
+            # process. A stalled holder must not park new turns indefinitely:
+            # bounded wait, then a clear retryable error instead of an invisible
+            # hang (turns created but never executed -> lease expiry ->
+            # worker_lost on the frontend).
+            try:
+                async with asyncio.timeout(10):
+                    async with self._lock:
+                        from deeptutor.services.workspace.activity import acquire_activity
 
-                activity = acquire_activity()
-                try:
-                    execution.task = asyncio.create_task(self._run_turn(execution))
-                except BaseException:
-                    activity.close()
-                    raise
-                execution.task.add_done_callback(lambda _done: activity.close())
-                if execution.lease is not None and self.coordinator is not None:
-                    execution.coordination_task = asyncio.create_task(
-                        self._coordinate_execution(execution)
-                    )
+                        activity = acquire_activity()
+                        try:
+                            execution.task = asyncio.create_task(self._run_turn(execution))
+                        except BaseException:
+                            activity.close()
+                            raise
+                        execution.task.add_done_callback(lambda _done: activity.close())
+                        if execution.lease is not None and self.coordinator is not None:
+                            execution.coordination_task = asyncio.create_task(
+                                self._coordinate_execution(execution)
+                            )
+            except TimeoutError:
+                raise RuntimeError(
+                    "Turn startup is busy (another turn is finalizing); try again in a moment"
+                ) from None
         except Exception as exc:
             async with self._lock:
                 self._executions.pop(turn["id"], None)

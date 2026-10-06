@@ -290,7 +290,7 @@ DEFAULT_CHAT_PARAMS: dict[str, Any] = {
     # without tool calls ends the loop early — the normal exit).
     "max_rounds": 8,
     "exploring": {"max_tokens": 1600},
-    "responding": {"max_tokens": 8000},
+    "responding": {"max_tokens": 16000},
 }
 
 # A capability that makes several different LLM calls cannot be described by
