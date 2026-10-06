@@ -664,6 +664,73 @@ async def enhance(req: EnhanceRequest):
 
 # ---------- 题目保存 ----------
 
+
+def _normalize_question_images(text: str) -> str:
+    """把题面里的图片引用发布为工作区附件，替换成可访问 URL。
+
+    保存题库时 AI 生成题面里的配图引用有两种坏形态：base64 内嵌（题库列表
+    页不渲染）与 outputs/ 相对路径（前端按当前路由解析 → 404）。这里统一走
+    系统 workspace 发布机制（/files/workspace-items/...，已验证 200），
+    与对话早期附件同机制。任何一步失败都原样返回，不影响保存。
+    """
+    import base64 as _b64
+    import re
+    import uuid
+
+    try:
+        from deeptutor.services.workspace.service import get_content_workspace_service
+    except Exception:
+        return text
+
+    try:
+        svc = get_content_workspace_service()
+        binding = svc.current_binding()
+    except Exception:
+        return text
+
+    def _publish_bytes(raw: bytes, ext: str) -> str:
+        rel = f"outputs/chat/question-bank-fig/{uuid.uuid4().hex}.{ext}"
+        target = svc.resolve(binding, rel, write=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        published = svc.publish(
+            binding,
+            [{"path": rel, "title": "配图", "caption": "题目配图"}],
+        )
+        if published:
+            return published[0].url
+        return ""
+
+    def _repl(m: re.Match) -> str:
+        src = m.group(2).strip()
+        try:
+            if src.startswith("data:image/"):
+                meta, _, data = src.partition(",")
+                raw = _b64.b64decode(data)
+                ext = meta.split(";")[0].split("/")[-1] or "png"
+                url = _publish_bytes(raw, ext)
+                if url:
+                    return f"![配图]({url})"
+            elif src.startswith("outputs/"):
+                p = svc.resolve(binding, src)
+                if p.is_file():
+                    rel = svc.relative_path(binding, p)
+                    published = svc.publish(
+                        binding,
+                        [{"path": rel, "title": "配图", "caption": "题目配图"}],
+                    )
+                    if published:
+                        return f"![配图]({published[0].url})"
+        except Exception:
+            pass
+        return m.group(0)
+
+    try:
+        return re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", _repl, text)
+    except Exception:
+        return text
+
+
 @router.post("/save-question")
 async def save_question(req: SaveQuestionRequest):
     """保存题目到题库或错题本。
@@ -679,6 +746,8 @@ async def save_question(req: SaveQuestionRequest):
 
     # 选项拼进题面，保持与导入模板一致
     text = req.question.strip()
+    # 配图规范化：base64 / 相对路径 → 可访问附件 URL（发布失败原样保留）
+    text = _normalize_question_images(text)
     if req.options:
         opts = "  ".join(f"{k}. {v}" for k, v in sorted(req.options.items()))
         text = f"{text}\n{opts}"
