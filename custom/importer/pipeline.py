@@ -47,6 +47,8 @@ def scan_documents(directory: str | Path) -> dict:
     for f in sorted(d.rglob('*')):
         if not f.is_file() or f.name.endswith('.enriched.md'):
             continue
+        if f.name.startswith('$'):  # 编辑器锁/缓存/损坏文件，不导入
+            continue
         if _is_derived(f, d):
             continue
         ext = f.suffix.lower()
@@ -71,19 +73,37 @@ def scan_documents(directory: str | Path) -> dict:
     }
 
 
+def _settings_dir() -> Path:
+    # DeepTutor 运行时设置目录（容器内 /app/data/user/settings）
+    return Path(__file__).resolve().parents[2] / 'data' / 'user' / 'settings'
+
+
+def _default_mimo_key() -> str:
+    # api_key 未显式传入时，回退读取用户已配置的 MiMo key
+    try:
+        import json
+        cfg = _settings_dir() / 'model_catalog.json'
+        if not cfg.is_file():
+            return ''
+        data = json.loads(cfg.read_text(encoding='utf-8'))
+        active = data.get('active_profile_id', '') or 'xiaomi_mimo-llm'
+        for m in data.get('models', []):
+            if m.get('id') == active or m.get('provider') == 'xiaomi_mimo':
+                key = (m.get('api_key') or '').strip()
+                if key:
+                    return key
+    except Exception:
+        pass
+    return ''
+
+
 def import_documents(kb_name: str, directory: str | Path,
                      api_key: str = '', model: str = 'mimo-v2.6-flash',
                      use_fallback: bool = True,
                      on_progress=None) -> dict:
-    """完整导入流程。
-
-    参数：
-      kb_name       目标知识库
-      directory     源目录
-      api_key       MiMo Key（用于残留图片兜底）
-      use_fallback  是否启用 MiMo 兜底
-      on_progress   进度回调 (msg) -> None
-    """
+    # 完整导入流程
+    if not api_key:
+        api_key = _default_mimo_key()
     def log(msg):
         if on_progress:
             on_progress(str(msg))
@@ -165,11 +185,32 @@ def import_documents(kb_name: str, directory: str | Path,
 
     # ③ 批量入库
     log(f'开始导入 {len(prepared)} 个文件到「{kb_name}」...')
+    from .core import kb_raw_dir
+    try:
+        raw_dir = kb_raw_dir(kb_name)
+        raw_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:  # noqa: BLE001
+        log(f'  定位知识库 raw 目录失败（图片不会随文档入库）：{e}')
+        raw_dir = None
+
     ok_count = 0
     for i in range(0, len(prepared), 10):
         chunk = prepared[i:i + 10]
         try:
             import_paths_sync(kb_name, chunk)
+            # 图片随 md 一起进 raw/：MinerU 导出的 images/ 在解析临时目录，
+            # 只搬 md 的话 raw/ 里的相对引用 images/block_N.png 会悬空，
+            # 前端渲染就变成 "Image block"。
+            if raw_dir is not None:
+                for md in chunk:
+                    src_img = md.parent / 'images'
+                    if not src_img.is_dir():
+                        continue
+                    dst_img = raw_dir / 'images'
+                    dst_img.mkdir(parents=True, exist_ok=True)
+                    for p in src_img.iterdir():
+                        if p.is_file():
+                            (dst_img / p.name).write_bytes(p.read_bytes())
             ok_count += len(chunk)
             log(f'  已导入 {ok_count}/{len(prepared)}')
         except Exception as e:

@@ -685,7 +685,8 @@ def count_locators(md_path: Path) -> int:
     """Markdown 里文档库定位符图片的数量。"""
     if not md_path.is_file():
         return 0
-    return len(LOCATOR_RE.findall(md_path.read_text(encoding='utf-8')))
+    return len(LOCATOR_RE.findall(
+        md_path.read_text(encoding='utf-8', errors='replace')))
 
 
 # MinerU 会把图片的**文字内容**内联成这样一个块：
@@ -747,7 +748,7 @@ def materialize_images(md_path: Path, on_progress=None,
     if not md_path.is_file():
         return md_path
 
-    text = md_path.read_text(encoding='utf-8')
+    text = md_path.read_text(encoding='utf-8', errors='replace')
     # 注意用 finditer + group(2)：正则有两个捕获组，findall 会返回元组
     locators = list(dict.fromkeys(
         mo.group(2) for mo in LOCATOR_RE.finditer(text)))  # 去重保序

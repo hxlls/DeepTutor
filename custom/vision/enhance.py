@@ -93,7 +93,7 @@ def count_images(md_path: Path) -> tuple[int, int]:
     """返回 (引用总数, 唯一图片数)。"""
     if not md_path.exists():
         return 0, 0
-    text = md_path.read_text(encoding='utf-8')
+    text = md_path.read_text(encoding='utf-8', errors='replace')
     refs = IMG_RE.findall(text)
     base = md_path.parent
     uniq = set()
@@ -119,7 +119,7 @@ def enhance_markdown(md_path: Path, api_key: str,
     if not md_path.exists():
         return {'ok': False, 'msg': f'文件不存在: {md_path}'}
 
-    text = md_path.read_text(encoding='utf-8')
+    text = md_path.read_text(encoding='utf-8', errors='replace')
     base = md_path.parent
     matches = list(IMG_RE.finditer(text))
 
