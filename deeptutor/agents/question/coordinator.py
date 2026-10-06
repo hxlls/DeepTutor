@@ -89,7 +89,9 @@ class AgentCoordinator:
                 stream=stream,
             ),
         )
-        return self._legacy_summary(result)
+        summary = self._legacy_summary(result)
+        await self._save_questions_to_bank(summary)
+        return summary
 
     async def generate_from_exam(
         self,
@@ -143,6 +145,7 @@ class AgentCoordinator:
             )
             summary = self._legacy_summary(result)
             summary["trace"] = trace
+            await self._save_questions_to_bank(summary)
             return summary
         except Exception as exc:
             logger.exception("Legacy AgentCoordinator.generate_from_exam failed: %s", exc)
@@ -216,6 +219,54 @@ class AgentCoordinator:
         if self.output_dir:
             return Path(self.output_dir).name or "legacy-question"
         return "legacy-question"
+
+    async def _save_questions_to_bank(self, summary: dict[str, Any]) -> int:
+        # 把出题结果自动写入题库（按主题自动分类），返回保存数量
+        try:
+            results = summary.get("results") or []
+            qa_pairs = []
+            for r in results:
+                if isinstance(r, dict) and r.get("success") and r.get("qa_pair"):
+                    qa_pairs.append(r["qa_pair"])
+            if not qa_pairs:
+                return 0
+            from deeptutor.services.session import get_sqlite_session_store
+            store = get_sqlite_session_store()
+            items = []
+            for qa in qa_pairs:
+                text = str(qa.get("question") or "").strip()
+                if not text:
+                    continue
+                opts = qa.get("options") or {}
+                if isinstance(opts, dict) and opts:
+                    text = text + "\n" + "  ".join(f"{k}. {v}" for k, v in sorted(opts.items()))
+                topic = str(qa.get("concentration") or qa.get("topic") or qa.get("question_type") or "对话出题").strip()
+                topic = (topic or "对话出题")[:200]
+                items.append({
+                    "origin_type": "external_import",
+                    "origin_ref": f"assistant:{topic}",
+                    "question_id": str(abs(hash(text)) % (10 ** 16)),
+                    "question": text[:4000],
+                    "question_type": str(qa.get("question_type") or "")[:100],
+                    "correct_answer": str(qa.get("correct_answer") or "")[:1000],
+                    "explanation": str(qa.get("explanation") or "")[:2000],
+                    "user_answer": "",
+                    "source": "assistant",
+                    "material_title": topic,
+                    "is_correct": True,
+                })
+            if not items:
+                return 0
+            n = await store.upsert_notebook_entries(None, items)
+            if n:
+                await self._emit_callback({
+                    "type": "status",
+                    "content": f"已自动保存 {n} 道题到题库（分类：{items[0]['material_title']}）",
+                })
+            return n
+        except Exception:
+            logger.exception("save questions to bank failed")
+            return 0
 
     @staticmethod
     def _legacy_summary(result: dict[str, Any]) -> dict[str, Any]:

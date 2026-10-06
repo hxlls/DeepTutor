@@ -20,6 +20,7 @@ interface Props {
   correctAnswer?: string;
   explanation?: string;
   userAnswer?: string;
+  category?: string;
 }
 
 export default function SaveQuestionButton({
@@ -29,6 +30,7 @@ export default function SaveQuestionButton({
   correctAnswer = "",
   explanation = "",
   userAnswer = "",
+  category = "",
 }: Props) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -49,6 +51,7 @@ export default function SaveQuestionButton({
             correct_answer: correctAnswer,
             explanation,
             user_answer: userAnswer,
+            category,
             target,
           }),
         },

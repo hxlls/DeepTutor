@@ -919,6 +919,7 @@ export default function QuizViewer({
             correctAnswer={q.correct_answer ?? ""}
             explanation={q.explanation ?? ""}
             userAnswer={getUserAnswer(q, ans)}
+            category={q.concentration || q.question_type || ""}
           />
 
           {ans.submitted && (
