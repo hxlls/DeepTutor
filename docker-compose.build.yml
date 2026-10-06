@@ -86,7 +86,7 @@ services:
 
     ports:
       # 宿主机端口 : 容器内前端端口
-      - "${DEEPTUTOR_PORT:-80}:3782"
+      - "${DEEPTUTOR_PORT:-3782}:3782"
       # 后端 API（可选，调试用）
       - "${DEEPTUTOR_API_PORT:-8001}:8001"
 
