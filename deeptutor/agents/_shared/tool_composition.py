@@ -52,7 +52,6 @@ _CONDITIONAL_MOUNT_FLAGS: dict[str, str] = {
     "read_memory": "has_memory",
     "list_notebook": "has_notebooks",
     "write_note": "has_notebooks",
-    "question_bank": "has_question_bank",
     "read_skill": "has_skills",
     "load_tools": "has_deferred_tools",
     # The single execution surface for source code and shell scripts.
@@ -259,7 +258,7 @@ def compose_enabled_tools(
         if getattr(mount_flags, flag) and _builtin_allowed(tool_name):
             composed.append(tool_name)
     composed.extend(str(name) for name in capability_owned if str(name).strip())
-    for always_on in ("write_memory", "web_fetch", "github", "ask_user", "cron"):
+    for always_on in ("question_bank", "write_memory", "web_fetch", "github", "ask_user", "cron"):
         if _builtin_allowed(always_on):
             composed.append(always_on)
     return _finalize([*WORKSPACE_BASELINE_TOOLS, *composed], forced, suppressed)
